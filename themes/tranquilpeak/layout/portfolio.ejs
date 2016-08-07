@@ -1,14 +1,14 @@
 <div class="main-content-wrap">
   <h1>Portfolio</h1>
   <% site.data.portofolio.forEach(function(project) { %>
-    <div>
+    <div id="<%= project.title.split(' ').join('_').toLowerCase() %>">
       <h2><%= project.title %></h2>
       <p>
         <%= project.platform %>
-        <% project.downloads.forEach(function(x) { %> 
+        <% project.downloads.forEach(function(x) { %>
           | <a href="<%= x[1] %>">Live at <%= x[0] %></a>
         <% }) %>
-        <% project.press.forEach(function(x) { %> 
+        <% project.press.forEach(function(x) { %>
           | <a href="<%= x[1] %>">Press on <%= x[0] %></a>
         <% }) %>
       </p>
