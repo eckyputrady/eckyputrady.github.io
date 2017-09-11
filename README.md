@@ -1,6 +1,7 @@
 Personal website created using Hexo (static blog generator). Theme: `tranquilpeak`.
 
 ```
+npm install -g hexo
 npm install
 hexo server # for local development
 hexo deploy git # for deploying
