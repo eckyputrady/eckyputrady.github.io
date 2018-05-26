@@ -1,0 +1,87 @@
+<!DOCTYPE HTML>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="images/favicon.png"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.0/normalize.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/default.min.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans: 400,700|Lato"><link rel="stylesheet" href="/index.css"><script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script><script>hljs.initHighlightingOnLoad();</script><title>Haskell, Redis, Mailgun and Heroku Scheduler</title></head><body><header><nav><h1><a href="/">Ecky Putrady&#39;s</a></h1></nav></header><section><article><h6>2017-02-18</h6><h1>Haskell, Redis, Mailgun and Heroku Scheduler</h1><p>I recently worked on a Haskell application. One aspect of it is a background job that runs hourly. It connects to Redis and sends email using Mailgun. However, Haskell is not a mainstream language so there are not many tutorials of it. It took me quite a while to figure them all out, so I will write one in case it will save anyone's (e.g. me in the future) time. Oh, and don't worry to try it out since you can do all of this on Heroku free tier.</p><h2>Deploying Haskell Application to Heroku</h2><p>First of all, let's build a fresh Haskell project called <code>hero</code> with <a href="https://docs.haskellstack.org/en/stable/README/">stack</a>.</p><pre><code class="bash">stack new hero &amp;&amp; cd hero</code></pre><p>After that, let's push our application as is to Heroku. If you read Heroku documentation, it requires a &quot;Buildpack&quot; to setup and deploy your application. Heroku provides official ones for popular frameworks, like Play or Rails. However, they don't have one for Haskell, so we need either to build one or find one from the community. Fortunately, I found a working <a href="https://github.com/jackarthurm/heroku-buildpack-stack.git">Haskell Buildpack</a>, although it's quite obscure. So we'll use that when creating a Heroku application.</p><pre><code class="bash"># initialize git repo
+git init
+echo &quot;.stack-work&quot; &gt; .gitignore
+git add . &amp;&amp; git commit -m &quot;Initial commit&quot;
+
+# create a Heroku application with custom Buildpack
+heroku create --buildpack https://github.com/jackarthurm/heroku-buildpack-stack.git
+git push heroku master</code></pre><p>We can verify that we have a working Haskell application on Heroku by running it on a one-off dyno as follow:</p><pre><code class="bash">heroku run /app/.local/bin/hero-exe</code></pre><p>You should see &quot;someFunc&quot; being printed.</p><h2>Setting Up Scheduled Job</h2><p>Heroku is a fantastic platform. It has quite a number of add-ons. One of it is <a href="https://elements.heroku.com/addons/scheduler">Heroku Scheduler</a>, an add-on to run arbitrary command on a one-off dyno. It's not super flexible like cron, but it's enough for my need. In addition to that, it's totally free, which is awesome. So, we will use this to schedule our application to run hourly.</p><pre><code class="bash">heroku addons:create scheduler:standard
+heroku addons:open scheduler</code></pre><p>The last command should open a page to manage scheduled jobs. Go ahead and add a new job and put <code>/app/.local/bin/hero-exe +RTS -N</code> as the command to run. The <code>+RTS -N</code> is a parameter that you give to your Haskell application to enable parallelism by using as many cores as the machine has. Based on my experience, your application will run on an 8 cores machine by Heroku.</p><p>Wait until the time your job should be run by the scheduler and verify it by reading the logs:</p><pre><code class="bash">heroku logs -d scheduler</code></pre><p>You should see that &quot;someFunc&quot; is printed, indicating that your application has been scheduled successfully.</p><h2>Connecting to Redis</h2><p>Heroku provides Redis in a form of an <a href="https://elements.heroku.com/addons/heroku-redis">add-on</a>. It has a generous free plan which gives you 25MB of storage. It, however, doesn't persist your data on disk. Well, if you use Redis, mostly your use cases are caching. So that should not be a big deal anyway. Let's add that to our application.</p><pre><code class="bash">heroku addons:create heroku-redis:hobby-dev</code></pre><p>After installing Redis add-on, your application will have an environment variable called <code>REDIS_URL</code> that you can use to connect to Redis. The format of the value is <code>redis://&lt;user&gt;:&lt;password&gt;@&lt;domain&gt;:&lt;port&gt;</code>. You could just ignore the <code>user</code> part since Redis doesn't have a multi-user access feature.</p><p>One Haskell library that I have used successfully to connect to Redis is <a href="https://hackage.haskell.org/package/hedis">hedis</a>. It's simple to use and has a nice tutorial to get you started. Let's start writing some code for connecting to Redis.</p><pre><code class="haskell">{-# LANGUAGE OverloadedStrings #-}
+
+module Lib
+    ( someFunc
+    ) where
+
+import qualified Database.Redis as Redis
+import System.Environment
+import Network.URI
+import Data.Maybe
+import Data.List.Split
+import qualified Data.ByteString.Char8 as BS
+
+someFunc :: IO ()
+someFunc = do
+  putStrLn &quot;testing redis&quot;
+  testRedis
+  putStrLn &quot;testing redis done&quot;
+
+testRedis :: IO ()
+testRedis = do
+  conn &lt;- redisConn
+  hello &lt;- Redis.runRedis conn $ do
+    Redis.set &quot;hello&quot; &quot;world&quot;
+    Redis.get &quot;hello&quot;
+  putStrLn $ show hello
+
+redisConn :: IO Redis.Connection
+redisConn = do
+  env &lt;- getEnv &quot;REDIS_URL&quot; -- redis://user:pass@host:port
+  let uri = fromJust $ parseURI env
+  let auth = fromJust $ uriAuthority uri
+  let host = uriRegName auth
+  let port = tail $ uriPort auth
+  let pass = uriUserInfo auth |&gt; splitOn &quot;:&quot; |&gt; \xs -&gt; xs !! 1 |&gt; init |&gt; BS.pack
+  Redis.checkedConnect $ Redis.defaultConnectInfo
+    { Redis.connectHost = host
+    , Redis.connectPort = Redis.PortNumber (read port)
+    , Redis.connectAuth = Just pass
+    }
+
+(|&gt;) :: a -&gt; (a -&gt; b) -&gt; b
+a |&gt; f = f a</code></pre><p>Before compiling the application, you need to add few dependencies in your <code>hero.cabal</code> file. <code>hedis</code> is obviously needed, but you also need <code>split</code>, <code>bytestring</code> and <code>network-uri</code> as well. They are used to parse the <code>REDIS_URL</code> value.</p><p>Now let's push that into Heroku to test whether it connects correctly.</p><pre><code class="bash">git commit -am &quot;Test Redis&quot;
+git push heroku master
+heroku run /app/.local/bin/hero-exe</code></pre><p>You should see the following output indicating that the application has connected correctly to Redis.</p><pre><code class="bash">testing redis
+Right (Just &quot;world&quot;)
+testing redis done</code></pre><h2>Sending Email via Mailgun</h2><p>Before discovering Mailgun, I used to interface with SMTP directly. Boy, it was a <a href="http://www.urbandictionary.com/define.php?term=P.I.T.A">PITA</a>. Few problems arose like your mail provider doesn't give access because your application is not considered secure and the Haskell library in this area is not good. Mailgun eases the email sending by allowing you to do it via REST API. They also give you a starter domain for testing. So it almost works out of the box, basically.</p><p>Haskell, fortunately, has a Mailgun wrapper library called <a href="https://hackage.haskell.org/package/hailgun">hailgun</a>. The documentation is not as good as hedis since it doesn't give you any tutorial to get started. It's quite common in Haskell-land for a library to be documented poorly. However, this library is quite simple that if you just follow the types, you can figure it out easily what to do. But still, a bit of tutorial could save me time here.</p><p>So, after setting up a Mailgun account, let's write some code to test it:</p><pre><code class="haskell">{-# LANGUAGE OverloadedStrings #-}
+
+module Lib
+    ( someFunc
+    ) where
+
+import Mail.Hailgun
+import Data.Either.Unwrap
+
+someFunc :: IO ()
+someFunc = do
+  putStrLn &quot;testing mail&quot;
+  testEmail
+  putStrLn &quot;testing mail done&quot;
+
+testEmail :: IO ()
+testEmail = sendEmail hailgunCtx hailgunMsg &gt;&gt;= (putStrLn . show)
+
+hailgunCtx =
+  HailgunContext &quot;get.domain.from.mailgun&quot;
+                 &quot;get.key.from.mailgun&quot;
+                 Nothing
+
+hailgunMsg = fromRight $
+  hailgunMessage &quot;Test Subject&quot;
+                 (TextOnly &quot;Test content&quot;)
+                 &quot;address.for.respond@gmail.com&quot;
+                 emptyMessageRecipients { recipientsTo = [&quot;recipient@gmail.com&quot;] }
+                 []</code></pre><p>You need to add <code>hailgun</code> and <code>either-unwrap</code> in your <code>hero.cabal</code> file. We don't need to run this in Heroku for starter. Let's just run it in GHCi and call the function directly:</p><pre><code class="bash">stack ghci
+*Main&gt; someFunc</code></pre><p>You should receive the email in the email you listed as the recipient. You will also get the following output indicating that we have connected succesfully to Mailgun.</p><pre><code class="bash">testing mail
+Right (HailgunSendResponse {hsrMessage = &quot;Queued. Thank you.&quot;, hsrId = &quot;&lt;xxxxx&gt;&quot;})
+testing mail done</code></pre><p>Obviously, you don't want to hardcode your Mailgun credentials in your source code. The best practice is to put it in the environment variables. In Heroku, you can add an environment variable via <code>heroku config:set &lt;KEY&gt;=&lt;VALUE&gt;</code> command. We can adjust our code accordingly to read the credentials from the environment variables instead.</p><h2>Closing</h2><p>In this blog post, I have shown you how Haskell can be used for building practical application. All the code above is not intended as production-ready code as it doesn't handle errors gracefully. I keep it that way for simplicity.</p><p>That's it, folks! Hope it helps.</p></article></section><footer><h3>Ecky Putrady, 2018</h3><h3>Generated by a <a href="https://github.com/eckyputrady/eckyputrady.github.io">Haskell static site generator</a></h3></footer></body></html>
