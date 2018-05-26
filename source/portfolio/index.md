@@ -1,3 +1,0 @@
-title: "portfolio"
-layout: "portfolio"
----
