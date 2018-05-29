@@ -23,7 +23,10 @@ There's no need for build step since entering development mode already build a d
 
 Now, we deploy by pushing to master branch.
 
+NOTE: Make sure you have committed everything in the source branch!
+
 ```bash
+rm -rf /tmp/output
 mv output /tmp/output
 git checkout master
 mv .git /tmp/.git
