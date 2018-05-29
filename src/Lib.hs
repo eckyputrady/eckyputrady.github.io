@@ -16,19 +16,16 @@ someFunc = build
 articles 
   :: [( String -- title
       , String -- date
-      , String -- output filename
-      , String -- input filename
+      , String -- slug (input & output)
       )]
 articles = 
   [ ( "Haskell, Redis, Mailgun and Heroku Scheduler"
-    , "2017-02-18"
-    , "haskell-redis-mailgun-heroku-scheduler.html"
-    , "heroku.md"
+    , "2017/02/18"
+    , "Haskell-Heroku-Mailgun-Redis.md"
     )
   , ( "The 5 Phases Of Startup"
-    , "2015-01-01"
-    , "the-5-phases-of-startup.html"
-    , "startup.md"
+    , "2015/01/01"
+    , "The-5-Phases-Of-Startup.md"
     )
   ]
 
@@ -38,26 +35,29 @@ build = do
     inputDir = "input"
     outputDir = "output"
     inputPostsDir = inputDir </> "posts"
-    outputPostsDir = outputDir </> "posts"
+    stripExtension = fromMaybe "" . headMay . splitElem '.'
+    outputPostDir (title, date, slug) = date </> stripExtension slug
 
   createDirectoryIfMissing True outputDir
 
   -- create index HTML
-  let articleInfo (t, d, o, _) = (t, d, "posts" </> o)
+  let articleInfo a@(title, date, slug) = (title, date, outputPostDir a)
   writeFile (outputDir </> "index.html") . encodeUtf8 . toStrict
     $ Templates.index (map articleInfo articles)
 
   -- create post HTML
-  let 
-    publishPost (title, date, outputFile, inputFile) = do
-      postContent <- readFile $ inputPostsDir </> inputFile
-      let converted = markdown defaultMarkdownSettings $ fromStrict . decodeUtf8 $ postContent
-      writeFile (outputPostsDir </> outputFile) $ toStrict . encodeUtf8 $ articlePage title date converted
-  createDirectoryIfMissing True outputPostsDir
+  let publishPost a@(title, date, slug) = do
+        postContent <- readFile $ inputPostsDir </> slug
+        let converted = markdown defaultMarkdownSettings $ fromStrict . decodeUtf8 $ postContent
+            dir = outputDir </> outputPostDir a
+        createDirectoryIfMissing True dir
+        writeFile (dir </> "index.html") $ toStrict . encodeUtf8 $ articlePage title date converted
   forM_ articles publishPost
 
   -- copy various necessary files
   let straightCopy n = copyFile (inputDir </> n) (outputDir </> n)
-  straightCopy "index.css"
-  straightCopy "CNAME"
-  straightCopy ".gitignore"
+  mapM_ straightCopy
+    [ "index.css"
+    , "CNAME"
+    , ".gitignore"
+    ]
