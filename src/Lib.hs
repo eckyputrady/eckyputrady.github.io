@@ -19,7 +19,11 @@ articles
       , String -- slug (input & output)
       )]
 articles = 
-  [ ( "Haskell, Redis, Mailgun and Heroku Scheduler"
+  [ ( "Building a RESTful API in Haskell"
+    , "2018/09/22"
+    , "Haskell-RESTful.md"
+    )
+  , ( "Haskell, Redis, Mailgun and Heroku Scheduler"
     , "2017/02/18"
     , "Haskell-Heroku-Mailgun-Redis.md"
     )
