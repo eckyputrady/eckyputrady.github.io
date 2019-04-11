@@ -1,0 +1,348 @@
+<!DOCTYPE HTML>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="images/favicon.png"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.0/normalize.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/default.min.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans: 400,700|Lato"><link rel="stylesheet" href="/index.css"><script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script><script>hljs.initHighlightingOnLoad();</script><title>Building a RESTful API in Haskell</title></head><body><header><nav><h1><a href="/">Ecky Putrady&#39;s</a></h1></nav></header><section><article><h6>2018/09/22</h6><h1>Building a RESTful API in Haskell</h1><h2>Introduction</h2><p>Despite being infamously known as impractical programming language with steep learning curve, Haskell is a good choice for building web applications. The ecosystem is mature enough so that you can find packages to support web development.</p><p>In this article, we will be building a simple CRUD RESTful API with Haskell. Our API will manage a todo list. We can add, remove, update and read our todos. Our API follows the API blueprint specification below:</p><pre><code class="bash">FORMAT: 1A
+
+# Todos API
+
+Todos API is a todo storage backend for [TodoMVC](//todomvc.com).
+
+# Group Todos
+
+# Todos Collection [/todos]
+
+## Create a Todo [POST]
+
++ Request (application/json)
+
+            {
+                &quot;title&quot;: &quot;dredd&quot;
+            }
+
++ Response 201 (application/json; charset=utf-8)
+
+            {
+                &quot;id&quot;: 42,
+                &quot;title&quot;: &quot;dredd&quot;,
+                &quot;completed&quot;: false
+            }
+
+## List all Todos [GET]
+
++ Response 200 (application/json; charset=utf-8)
+
+            [{
+                &quot;id&quot;: 42,
+                &quot;title&quot;: &quot;dredd&quot;,
+                &quot;completed&quot;: false
+            }]
+
+## Archive completed Todos [DELETE]
+
++ Response 204
+
+# Todo [/todos/{id}]
+
++ Parameters
+  + id (required, number, `42`)
+
+## Get a Todo [GET]
+
++ Response 200 (application/json; charset=utf-8)
+
+            {
+                &quot;id&quot;: 42,
+                &quot;title&quot;: &quot;dredd&quot;,
+                &quot;completed&quot;: false
+            }
+
+## Update a Todo [PUT]
+
++ Request (application/json)
+
+            {
+                &quot;title&quot;: &quot;dredd&quot;,
+                &quot;completed&quot;: true
+            }
+
++ Response 200 (application/json; charset=utf-8)
+
+            {
+                &quot;id&quot;: 42,
+                &quot;title&quot;: &quot;dredd&quot;,
+                &quot;completed&quot;: true
+            }
+
+## Delete a Todo [DELETE]
+
++ Response 204</code></pre><h2>Project Setup</h2><p>Let's start by creating a new project with <code>stack</code>.</p><pre><code class="bash">$ stack new todomvc-api
+$ cd todomvc-api</code></pre><p>Next, we modify the <code>package.yaml</code> file to include the following packages:</p><pre><code class="yaml hljs">dependencies:
+- base
+- classy-prelude
+- lens
+- generic-lens
+
+library:
+  source-dirs: src
+  dependencies:
+  - aeson
+  - scotty
+  - wai
+  - http-types
+  - data-has</code></pre><p>We use <code>classy-prelude</code> as a replacement for default prelude. <code>classy-prelude</code> has many benefits over the default one. The one that we reap the most in this article is being able to use various common modules with one single import.</p><p>We also import <code>lens</code> and <code>generic-lens</code>. Those libraries helps us in modifying accessing and modifying data structure.</p><p><code>aeson</code> will be used for JSON serialization and deserialization.</p><p>For handling HTTP requests, we will use <code>scotty</code>, <code>wai</code> and <code>http-types</code>. <code>scotty</code> mostly handles the routing side of the application, while <code>wai</code> and <code>http-types</code> are only providing us few supporting functions and types.</p><p><code>data-has</code> is a small but useful package that allows as to express &quot;we can get type A from r&quot;. This might not seem makes sense now, but we will see how it will be used later.</p><p>In addition to package dependencies, we also lists the following language extensions:</p><pre><code class="yaml hljs">default-extensions:
+- OverloadedStrings
+- GeneralizedNewtypeDeriving
+- ConstraintKinds
+- FlexibleContexts
+- NoImplicitPrelude
+- DataKinds
+- DeriveGeneric
+- DuplicateRecordFields
+- TypeApplications
+- ScopedTypeVariables</code></pre><h2>Defining Types</h2><p>Let's move on to defining the types. We will define our types in <code>Todo.Types</code> module. Let's type in the module definition as well as the required imports.</p><pre><code class="haskell hljs">module Todo.Types where
+
+import ClassyPrelude
+import Data.Aeson
+import Data.Generics.Product
+import GHC.Generics (Generic)</code></pre><p>From the API blueprint, we may infer that there are 3 types. The first one represents the request to create a todo:</p><pre><code class="haskell hljs">newtype CreateTodo = CreateTodo
+  { title :: Text
+  } deriving (Generic, Show)
+
+instance ToJSON CreateTodo
+instance FromJSON CreateTodo</code></pre><p>The second one represents the request to update a todo:</p><pre><code class="haskell hljs">data UpdateTodo = UpdateTodo
+  { title :: Text
+  , completed :: Bool
+  } deriving (Generic, Show)
+
+instance ToJSON UpdateTodo
+instance FromJSON UpdateTodo</code></pre><p>And finally, the todo object itself:</p><pre><code class="haskell hljs">data Todo = Todo
+  { id :: Int
+  , title :: Text
+  , completed :: Bool
+  } deriving (Generic, Show)
+
+instance ToJSON Todo
+instance FromJSON Todo</code></pre><p>We also define <code>ToJSON</code> and <code>FromJSON</code> instances for each of the types. This way, they can be serialized and deserialized to JSON.</p><h2>Implementing Services</h2><p>We will now create a module that implements all operation to support the API, such as creating a todo and reading all todos. We name the module as <code>Todo.Service</code>:</p><pre><code class="haskell hljs">module Todo.Service where
+
+import ClassyPrelude hiding (snoc)
+import Todo.Types
+import Control.Lens
+import Data.Has
+import Data.Generics.Product</code></pre><p>Since we want to store the created todos, let's do with something simple for now: just store it in-memory. The data structure where the todos are stored is defined like so:</p><pre><code class="haskell hljs">data State = State
+  { lastId :: Int
+  , todos :: [Todo]
+  } deriving (Generic, Show)
+
+initialState :: State
+initialState = State { lastId = 0, todos = [] }</code></pre><p>Every <code>Todo</code> has an ID that we need to generate. To ensure that there's no duplicated ID, we generate it in increasing order. <code>lastId</code> field keeps track of the last generated ID. With this value at hand, generating a new ID is just incrementing this value.</p><p><code>todos</code> is a list of <code>Todo</code>. This is the place where we store all of the <code>Todo</code>s that our application currently has.</p><p>Now let's list all of the required operations:</p><pre><code class="haskell hljs">type Deps r m = (Has (TVar State) r, MonadReader r m, MonadIO m)
+
+addTodo :: Deps r m =&gt; CreateTodo -&gt; m Todo
+removeCompletedTodos :: Deps r m =&gt; m ()
+getAllTodos :: Deps r m =&gt; m [Todo]
+getTodo :: Deps r m =&gt; Int -&gt; m (Maybe Todo)
+updateTodo :: Deps r m =&gt; Todo -&gt; m (Maybe Todo)
+removeTodo :: Deps r m =&gt; Int -&gt; m ()</code></pre><p>Each operation maps exactly to each endpoint as specified in the blueprint above. For each operation, we constraint it to <code>Deps r m</code>. This constraint says that the operation may perform IO (<code>MonadIO</code>) and able to get <code>TVar State</code> from the environment (<code>Has (TVar State) r, MonadReader r m</code>).</p><p>We will implement each function. Let's start from <code>addTodo</code>:</p><pre><code class="haskell hljs">withTVar :: Deps r m =&gt; (TVar State -&gt; STM a) -&gt; m a
+withTVar f = do
+  tvar &lt;- asks getter
+  atomically $ f tvar
+
+addTodo :: Deps r m =&gt; CreateTodo -&gt; m Todo
+addTodo createTodo = withTVar $ \tvar -&gt; do
+  state &lt;- readTVar tvar
+  let newId = 1 + state ^. field @&quot;lastId&quot;
+      newTodo = 
+        Todo  { id = newId
+              , title = createTodo ^. field @&quot;title&quot;
+              , completed = False
+              }
+      newState = 
+        State { lastId = newId
+              , todos = snoc (state ^. field @&quot;todos&quot;) newTodo
+              }
+  writeTVar tvar newState
+  return newTodo</code></pre><p>We first define a utility function <code>withTVar</code>. This function gets the <code>TVar</code> from the environment and execute the supplied function within the <code>STM</code> monad. This routine is necessary for all functions, hence it makes sense to create a utility function to do this to reduce code duplication.</p><p>In the <code>addTodo</code> function, we first read the <code>State</code> from <code>TVar</code>. Then, we generate a new ID for the new <code>Todo</code>. The new ID is generated by incrementing the last generated ID. We keep track the last generated ID in the <code>lastId</code> field in the <code>State</code> data structure. After that, we create a <code>Todo</code> by supplying the newly generated ID and the title from <code>CreateTodo</code> from the parameter. The newly created <code>Todo</code> is then appended to the existing <code>todos</code> field, using <code>snoc</code> function. <code>snoc</code> is a function that adds an element to the end of the list. Finally, we write the <code>State</code> back to the <code>TVar</code> and return the newly created <code>Todo</code>.</p><pre><code class="haskell hljs">removeCompletedTodos :: Deps r m =&gt; m ()
+removeCompletedTodos = withTVar $ \tvar -&gt; 
+  modifyTVar' tvar $ \state -&gt;
+    state &amp; field @&quot;todos&quot; %~ (filter (not . getField @&quot;completed&quot;))</code></pre><p>In <code>removeCompletedTodos</code> function, we use <code>modifyTVar'</code> function to replace the state with a new one. <code>state &amp; field @&quot;todos&quot; %~ f</code> is used to apply function <code>f</code> to <code>todos</code> field in <code>state</code>, and create a new <code>State</code> structure with <code>todos</code> field replaced by the result of that function application. The <code>(%~)</code> and <code>(&amp;)</code> functions become available once we import <code>Control.Lens</code> module. The function that we apply is <code>(filter (not . getField @&quot;completed&quot;))</code>, which basically says that we filter the <code>todos</code> list so that only <code>Todo</code>s that are not yet completed remains.</p><pre><code class="haskell hljs">getAllTodos :: Deps r m =&gt; m [Todo]
+getAllTodos = withTVar $ \tvar -&gt; do
+  state &lt;- readTVar tvar
+  return $ state ^. field @&quot;todos&quot;</code></pre><p><code>getAllTodos</code> is pretty straightforward, we just read the <code>State</code> from the <code>TVar</code>, and return the <code>todos</code> field.</p><pre><code class="haskell hljs">getTodo :: Deps r m =&gt; Int -&gt; m (Maybe Todo)
+getTodo todoId = do
+  todos &lt;- getAllTodos
+  return $ find (\todo -&gt; todo ^. field @&quot;id&quot; == todoId) todos</code></pre><p><code>getTodo</code> reuses <code>getAllTodos</code> and find a <code>Todo</code> that has the given ID. Since it's possible that the caller gives bad ID, the return value is wrapped in a <code>Maybe</code>. <code>Nothing</code> will indicates that the <code>Todo</code> with the given ID is not found in our repository.</p><pre><code class="haskell hljs">updateTodo :: Deps r m =&gt; Todo -&gt; m (Maybe Todo)
+updateTodo newTodo = withTVar $ \tvar -&gt; do
+  state &lt;- readTVar tvar
+  let existingTodos = state ^. field @&quot;todos&quot;
+      todoId = newTodo ^. field @&quot;id&quot;
+      mayTodo = find (\todo -&gt; todo ^. field @&quot;id&quot; == todoId) existingTodos
+  case mayTodo of
+    Nothing -&gt;
+      return Nothing
+    Just _ -&gt; do
+      let replace todo =
+            if todo ^. field @&quot;id&quot; == todoId
+            then newTodo
+            else todo
+          newState = state &amp; field @&quot;todos&quot; . traverse %~ replace
+      writeTVar tvar newState
+      return $ Just newTodo</code></pre><p>The <code>updateTodo</code> function is a bit more complicated then what we have encountered previously. We first get the <code>State</code> from the <code>TVar</code>. Then we check whether the ID presents in our <code>State</code> or not. If it is not present, then we return <code>Nothing</code> since there is nothing to update. Otherwise, we apply a utility function, <code>replace</code>, to each item in the <code>todos</code> field. The <code>replace</code> function receives a <code>Todo</code> and will return the <code>Todo</code> from the function if the ID doesn't match, otherwise return <code>newTodo</code> if the ID matches.</p><pre><code class="haskell hljs">removeTodo :: Deps r m =&gt; Int -&gt; m ()
+removeTodo todoId = withTVar $ \tvar -&gt;
+  modifyTVar' tvar $ \state -&gt;
+    state &amp; field @&quot;todos&quot; %~ (filter (\todo -&gt; todo ^. field @&quot;id&quot; /= todoId))</code></pre><p>In <code>removeTodo</code> function, we filter the items <code>todos</code> so that no item has <code>id</code> equals to the given <code>todoId</code>. This effectively removes the <code>Todo</code> with the same ID from our state, if such <code>Todo</code> exists.</p><h2>Routes</h2><p>We need to expose the functions defined in the <code>Todo.Service</code> module over HTTP. In order to do that, we define <code>Todo.Routes</code> module. This module is in charge of handling HTTP requests, translating that to function calls in <code>Todo.Service</code> module, and translating the result back to HTTP responses.</p><pre><code class="haskell hljs">module Todo.Routes where
+
+import ClassyPrelude hiding (delete)
+import Control.Lens
+import Data.Generics.Product hiding (param)
+import Web.Scotty.Trans
+import Network.HTTP.Types.Status
+import Network.Wai
+import Todo.Types
+import qualified Todo.Service as S</code></pre><p>Let's define a skeleton for routes according to the API specification.</p><pre><code class="haskell hljs">routes :: S.Deps r m =&gt; ScottyT LText m ()
+routes = do
+  post &quot;/todos&quot; undefined
+  get &quot;/todos&quot; undefined
+  delete &quot;/todos&quot; undefined
+  get &quot;/todos/:id&quot; undefined
+  put &quot;/todos/:id&quot; undefined
+  delete &quot;/todos/:id&quot; undefined</code></pre><p>Let's implement each route starting from the top.</p><pre><code class="haskell hljs">  post &quot;/todos&quot; $ do
+    arg &lt;- jsonData
+    result &lt;- lift $ S.addTodo arg
+    status status201
+    json result</code></pre><p>The code snippet above handles <code>POST /todos</code> HTTP request. As the API spec says, this API endpoint is used to add a new <code>Todo</code>. We read the JSON payload from the request and pass that to <code>addTodo</code> function. Our application knows how to parse JSON into a <code>CreateTodo</code> struct because we have defined a <code>FromJSON</code> instance for <code>CreateTodo</code> in <code>Todo.Types</code> module. The result of <code>addTodo</code> function is then returned as JSON. In this case, our application knows how to convert <code>Todo</code> to JSON because we have defined a <code>ToJSON</code> instance for <code>Todo</code> in <code>Todo.Types</code> module. In addition to that, we also set the HTTP status response to 201.</p><pre><code class="haskell hljs">  get &quot;/todos&quot; $ do
+    result &lt;- lift $ S.getAllTodos
+    json result
+
+  delete &quot;/todos&quot; $ do
+    lift $ S.removeCompletedTodos
+    status status204</code></pre><p>The two routes above define handler for <code>GET /todos</code> and <code>DELETE /todos</code>. As you can see, the implementation is very straightforward. They don't need to read any parameter from HTTP request. They just need to invoke the correct functions in <code>Todo.Service</code> module and translate the result to HTTP response accordingly.</p><pre><code class="haskell hljs">  get &quot;/todos/:id&quot; $ do
+    todoId &lt;- param &quot;id&quot;
+    mayResult &lt;- lift $ S.getTodo todoId
+    case mayResult of
+      Nothing -&gt;
+        status status404
+      Just result -&gt;
+        json result</code></pre><p>The <code>GET /todos/:id</code> endpoint is used to get specific <code>Todo</code> item according to the ID path parameter. We parse the ID path parameter using <code>param &quot;id&quot;</code>. The parsed ID is then passed to <code>S.getTodo</code> function. The ID may not always correct. We might receive bogus ID so that there's no matching <code>Todo</code> found in our repository. On this scenario, <code>S.getTodo</code> function will return <code>Nothing</code>, in which we translate that to HTTP status 404. On the other hand, if we do find a <code>Todo</code>, then we return that as JSON.</p><pre><code class="haskell hljs">  put &quot;/todos/:id&quot; $ do
+    todoId &lt;- param &quot;id&quot;
+    arg :: UpdateTodo &lt;- jsonData
+    let todo = Todo { id = todoId
+                    , title = arg ^. field @&quot;title&quot;
+                    , completed = arg ^. field @&quot;completed&quot;
+                    }
+    mayResult &lt;- lift $ S.updateTodo todo
+    case mayResult of
+      Nothing -&gt;
+        status status404
+      Just result -&gt;
+        json result</code></pre><p><code>PUT /todos</code> endpoint is a bit trickier. We need to combine path parameter and JSON from HTTP request body into a <code>Todo</code> data structure. Once we have constructed <code>Todo</code>, we pass that to <code>S.updateTodo</code> function. We then translate the result to either a 404 or 200 with JSON payload.</p><pre><code class="haskell hljs">  delete &quot;/todos/:id&quot; $ do
+    todoId &lt;- param &quot;id&quot;
+    lift $ S.removeTodo todoId
+    status status204</code></pre><p>The <code>DELETE /todos/:id</code> endpoint is used delete a <code>Todo</code> item. For this endpoint, we just need to parse ID path parameter and pass that to <code>S.removeTodo</code> function.</p><h2>Main</h2><p>We define <code>Lib</code> module. This module basically kickstart the application into action.</p><pre><code class="haskell hljs">module Lib (main) where
+
+import ClassyPrelude
+import Todo.Routes as TodoR
+import Todo.Service as TodoS
+import Web.Scotty.Trans</code></pre><p>Next, we define our application's monad transformer stack. We know that our application needs to have access to <code>TVar TodoS.State</code> from the environment and able to perform <code>IO</code> actions. So, we just need a <code>ReaderT</code> over <code>IO</code>.</p><pre><code class="haskell hljs">type Env = TVar TodoS.State
+type App a = ReaderT Env IO a
+
+runApp :: Env -&gt; App a -&gt; IO a
+runApp = flip runReaderT</code></pre><p>Our <code>main</code> function is the function that actually starts the application:</p><pre><code class="haskell hljs">main :: IO ()
+main = do
+  env &lt;- newTVarIO TodoS.initialState
+  let runner = runApp env
+  scottyT 3000 runner TodoR.routes</code></pre><p>We create a new <code>TVar</code> with <code>newTVarIO</code>. We initialize it with the initial state of the application that we define with <code>TodoS.initialState</code> function. Then, we define <code>runner</code>. This is a function that transforms our monad (<code>App</code>) into <code>IO</code>. This transformer function is required as the second parameter of <code>scottyT</code> function. The last line of the above snippet starts the server on port 3000, with the <code>runner</code> transformer function and <code>TodoR.routes</code> as the HTTP request handler.</p><p>Finally, we need to edit <code>app/Main.hs</code> to call the <code>main</code> function we have just defined:</p><pre><code class="haskell hljs">module Main where
+
+import ClassyPrelude
+import qualified Lib
+
+main :: IO ()
+main = Lib.main</code></pre><p>Congratulations, we have finished our API implementation in Haskell!</p><h2>Test Drive</h2><p>Let's see our application in action. Build and run the application with the following command:</p><pre><code class="bash hljs">$ stack build
+$ stack exec todomvc-api-exe</code></pre><p>Let's open other terminal and issue various <code>curl</code> commands. We start by adding 3 new todo items.</p><pre><code class="bash hljs">$ curl --request POST \
+&gt;   --url http://localhost:3000/todos \
+&gt;   --header 'content-type: application/json' \
+&gt;   --data '{ &quot;title&quot;: &quot;TODO 1&quot; }'
+{&quot;completed&quot;:false,&quot;id&quot;:1,&quot;title&quot;:&quot;TODO 1&quot;}
+
+$ curl --request POST \
+&gt;   --url http://localhost:3000/todos \
+&gt;   --header 'content-type: application/json' \
+&gt;   --data '{ &quot;title&quot;: &quot;TODO 1&quot; }'
+{&quot;completed&quot;:false,&quot;id&quot;:2,&quot;title&quot;:&quot;TODO 2&quot;}
+
+$ curl --request POST \
+&gt;   --url http://localhost:3000/todos \
+&gt;   --header 'content-type: application/json' \
+&gt;   --data '{ &quot;title&quot;: &quot;TODO 1&quot; }'
+{&quot;completed&quot;:false,&quot;id&quot;:3,&quot;title&quot;:&quot;TODO 3&quot;}</code></pre><p>Let's see all of the todo items we have so far.</p><pre><code class="bash hljs">curl --request GET \
+&gt;   --url http://localhost:3000/todos \
+&gt;   --header 'content-type: application/json'
+[
+  {&quot;completed&quot;:false,&quot;id&quot;:1,&quot;title&quot;:&quot;TODO 1&quot;},
+  {&quot;completed&quot;:false,&quot;id&quot;:2,&quot;title&quot;:&quot;TODO 2&quot;},
+  {&quot;completed&quot;:false,&quot;id&quot;:3,&quot;title&quot;:&quot;TODO 3&quot;}
+]</code></pre><p>As we can see, the application correctly store our 3 todo items.</p><pre><code class="bash hljs">$ curl --request GET \
+&gt;   --url http://localhost:3000/todos/1
+{&quot;completed&quot;:false,&quot;id&quot;:1,&quot;title&quot;:&quot;TODO 1&quot;}</code></pre><p>The get single todo item endpoint also work correctly.</p><p>Let's try updating one of our todo item.</p><pre><code class="bash hljs">$ curl --request PUT \
+&gt;   --url http://localhost:3000/todos/1 \
+&gt;   --header 'content-type: application/json' \
+&gt;   --data '{ &quot;title&quot;: &quot;TODO 1 completed&quot;, &quot;completed&quot;: true }'
+{&quot;completed&quot;:true,&quot;id&quot;:1,&quot;title&quot;:&quot;TODO 1 completed&quot;}
+
+$ curl --request GET
+&gt;   --url http://localhost:3000/todos
+&gt;   --header 'content-type: application/json'
+[
+  {&quot;completed&quot;:true,&quot;id&quot;:1,&quot;title&quot;:&quot;TODO 1 completed&quot;},
+  {&quot;completed&quot;:false,&quot;id&quot;:2,&quot;title&quot;:&quot;TODO 2&quot;},
+  {&quot;completed&quot;:false,&quot;id&quot;:3,&quot;title&quot;:&quot;TODO 3&quot;}
+]</code></pre><p>We set our todo item with ID 1 to be completed. We also change the title.</p><p>Let's now remove all completed items.</p><pre><code class="bash hljs">$ curl --request DELETE \
+&gt;   --url http://localhost:3000/todos \
+&gt;   --header 'content-type: application/json'
+&gt;   -v
+*   Trying ::1...
+* TCP_NODELAY set
+* Connection failed
+* connect to ::1 port 3000 failed: Connection refused
+*   Trying 127.0.0.1...
+* TCP_NODELAY set
+* Connected to localhost (127.0.0.1) port 3000 (#0)
+&gt; DELETE /todos HTTP/1.1
+&gt; Host: localhost:3000
+&gt; User-Agent: curl/7.54.0
+&gt; Accept: */*
+&gt; content-type: application/json
+&gt;
+&lt; HTTP/1.1 204 No Content
+&lt; Date: Sun, 16 Sep 2018 08:43:59 GMT
+&lt; Server: Warp/3.2.23
+&lt;
+* Connection #0 to host localhost left intact</code></pre><p>The endpoint above does not return any response body. So, we set <code>curl</code> in verbose mode to inspect the resulting HTTP status. <code>204 No Content</code> is the HTTP status that we expect.</p><pre><code class="bash hljs">$ curl --request GET
+&gt;   --url http://localhost:3000/todos
+&gt;   --header 'content-type: application/json'
+[
+  {&quot;completed&quot;:false,&quot;id&quot;:2,&quot;title&quot;:&quot;TODO 2&quot;},
+  {&quot;completed&quot;:false,&quot;id&quot;:3,&quot;title&quot;:&quot;TODO 3&quot;}
+]</code></pre><p>The completed todo item is indeed removed when we get all todos.</p><p>Finally, let's try to remove one.</p><pre><code class="bash hljs">$ curl --request DELETE \
+&gt;   --url http://localhost:3000/todos/2 \
+&gt;   --header 'content-type: application/json'
+&gt;   -v
+*   Trying ::1...
+* TCP_NODELAY set
+* Connection failed
+* connect to ::1 port 3000 failed: Connection refused
+*   Trying 127.0.0.1...
+* TCP_NODELAY set
+* Connected to localhost (127.0.0.1) port 3000 (#0)
+&gt; DELETE /todos/2 HTTP/1.1
+&gt; Host: localhost:3000
+&gt; User-Agent: curl/7.54.0
+&gt; Accept: */*
+&gt; content-type: application/json
+&gt;
+&lt; HTTP/1.1 204 No Content
+&lt; Date: Sun, 16 Sep 2018 08:48:13 GMT
+&lt; Server: Warp/3.2.23
+&lt;
+* Connection #0 to host localhost left intact</code></pre><p>As expected, the endpoint responds with 204.</p><pre><code class="bash hljs">$ curl --request GET
+&gt;   --url http://localhost:3000/todos
+&gt;   --header 'content-type: application/json'
+[
+  {&quot;completed&quot;:false,&quot;id&quot;:3,&quot;title&quot;:&quot;TODO 3&quot;}
+]</code></pre><p>We also verify that the todo item with ID 2 is also removed from our todo items list.</p><h2>Closing</h2><p>In this article, we have seen how a simple CRUD RESTful API is built with Haskell. Thanks to Haskell's terseness and type system, we can do a lot with few lines of code.</p><p>While our application works, there are, however, other areas that this article does not yet touch:</p><ol><li>Input validation -- How do we respond with friendlier error message if client sends a malformed request?</li><li>Logging -- How to setup a proper logging format so that we can troubleshoot production issues?</li><li>Databases -- How should we store data so that it survives application reset?</li><li>Tests -- How to write tests? How should we structure our code so that they are loosely coupled and easier to test?</li><li>Deployment -- How should we package our Haskell application and ship it to production servers?</li><li>Static code analysis -- What are the available code quality tools that we can apply to our codebase so that we are more confident that our application is defect-free and maintainable?</li></ol><p>Those topics are worth exploring and important to learn before shipping the application to production.</p><p>In case you want to see the complete source code for application that we have just built, the code is hosted on <a href="https://github.com/eckyputrady/todomvc-api">github</a>.</p></article></section><footer><h3>Ecky Putrady, 2019</h3><h3>Generated by a <a href="https://github.com/eckyputrady/eckyputrady.github.io">Haskell static site generator</a></h3></footer></body></html>
